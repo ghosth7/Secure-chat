@@ -1,21 +1,52 @@
 import os
+import sys
+import subprocess
 import socket
 import socks
 import threading
 import json
 import base64
 import hashlib
+import time
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
+from stem.control import Controller
 
-# Configuración de Tor y puerto oculto
+# Dependencias necesarias
+DEPENDENCIAS = ["stem", "cryptography", "requests", "pycryptodome", "pysocks"]
+
+def instalar_dependencias():
+    """Detecta el sistema operativo e instala dependencias si faltan"""
+    print("\n🔍 Verificando dependencias...")
+
+    for paquete in DEPENDENCIAS:
+        try:
+            __import__(paquete)
+        except ImportError:
+            print(f"⚠️ Falta {paquete}, instalando...")
+            subprocess.run(["pip", "install", paquete])
+
+    # Instalar Tor si no está instalado (solo en Linux/Termux)
+    if sys.platform.startswith("linux"):
+        if not os.path.exists("/usr/bin/tor") and not os.path.exists("/data/data/com.termux/files/usr/bin/tor"):
+            print("⚠️ Tor no está instalado. Instalándolo...")
+            if "ANDROID_ROOT" in os.environ:  # Termux
+                subprocess.run(["pkg", "install", "tor", "-y"])
+            else:  # Ubuntu u otras distros Linux
+                subprocess.run(["sudo", "apt", "install", "tor", "-y"])
+
+    print("✅ Todas las dependencias están instaladas.\n")
+
+
+# Configuración de Tor y Proxy
 TOR_PROXY = ("127.0.0.1", 9050)
-HIDDEN_SERVICE_DIR = "/data/data/com.termux/files/home/.tor/hidden_service/"
+TOR_CONTROL_PORT = 9051
 PORT = 5000
-
-# Generar clave de cifrado AES con una contraseña única por sesión
 SESSION_KEY = hashlib.sha256(get_random_bytes(16)).digest()
 
+# Contador de mensajes
+mensaje_count = 0
+CAMBIO_IP_CADA = 2  # 🔥 Cambia de IP cada 2 mensajes
 
 def cifrar_mensaje(mensaje):
     """Cifra un mensaje con AES-256 en modo CBC"""
@@ -23,7 +54,6 @@ def cifrar_mensaje(mensaje):
     iv = cipher.iv
     ciphertext = cipher.encrypt(mensaje.ljust(32).encode())  # Padding
     return base64.b64encode(iv + ciphertext).decode()
-
 
 def descifrar_mensaje(mensaje_cifrado):
     """Descifra un mensaje cifrado con AES-256 en modo CBC"""
@@ -33,35 +63,24 @@ def descifrar_mensaje(mensaje_cifrado):
     cipher = AES.new(SESSION_KEY, AES.MODE_CBC, iv)
     return cipher.decrypt(ciphertext).strip().decode()
 
-
-def iniciar_tor():
-    """Inicia el servicio oculto en Tor y devuelve la dirección .onion"""
-    if not os.path.exists(HIDDEN_SERVICE_DIR):
-        os.makedirs(HIDDEN_SERVICE_DIR)
-    
-    torrc_path = os.path.expanduser("~/.torrc")
-    with open(torrc_path, "w") as torrc:
-        torrc.write(f"HiddenServiceDir {HIDDEN_SERVICE_DIR}\n")
-        torrc.write(f"HiddenServicePort {PORT} 127.0.0.1:{PORT}\n")
-
-    os.system("pkill tor")
-    os.system("tor &")
-    
-    # Esperar a que Tor genere el servicio
-    while not os.path.exists(f"{HIDDEN_SERVICE_DIR}/hostname"):
-        pass
-    
-    with open(f"{HIDDEN_SERVICE_DIR}/hostname", "r") as f:
-        return f.read().strip()
-
+def cambiar_ip_tor():
+    """Cambia la IP de Tor enviando el comando NEWNYM al servicio de control"""
+    try:
+        with Controller.from_port(port=TOR_CONTROL_PORT) as controller:
+            controller.authenticate()  # Conectar con Tor
+            controller.signal("NEWNYM")  # Solicitar nueva identidad
+            print("\n🔄 Cambio de IP solicitado a Tor...")
+    except Exception as e:
+        print(f"⚠️ Error al cambiar IP de Tor: {e}")
 
 def servidor():
-    """Función que inicia el servidor y espera conexiones"""
+    """Inicia el servidor y espera conexiones"""
+    global mensaje_count
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("127.0.0.1", PORT))
     server.listen(1)
     print("Esperando conexión...")
-    
+
     conn, addr = server.accept()
     print("Cliente conectado.")
 
@@ -71,6 +90,12 @@ def servidor():
             if not data:
                 break
             print(f"\nCliente: {descifrar_mensaje(data)}")
+            
+            # Contar mensajes y cambiar IP si es necesario
+            mensaje_count += 1
+            if mensaje_count % CAMBIO_IP_CADA == 0:
+                cambiar_ip_tor()
+
             msg = input("Tú: ")
             conn.send(cifrar_mensaje(msg).encode())
         except:
@@ -79,9 +104,9 @@ def servidor():
     conn.close()
     server.close()
 
-
 def cliente(onion_address):
     """Función que actúa como cliente y se conecta al servidor"""
+    global mensaje_count
     socks.set_default_proxy(socks.SOCKS5, *TOR_PROXY)
     client = socks.socksocket()
     client.connect((onion_address, PORT))
@@ -103,21 +128,23 @@ def cliente(onion_address):
     while True:
         msg = input("Tú: ")
         client.send(cifrar_mensaje(msg).encode())
-
+        
+        # Contar mensajes y cambiar IP si es necesario
+        mensaje_count += 1
+        if mensaje_count % CAMBIO_IP_CADA == 0:
+            cambiar_ip_tor()
 
 def main():
+    instalar_dependencias()
     print("🔒 Chat Seguro con Tor y Cifrado AES 🔒")
     username = input("Elige un nombre de usuario único para esta sesión: ")
-    
+
     print("\n¿Quieres ser el Host o el Cliente?")
     print("[H] Host (crear chat)")
     print("[C] Cliente (conectarse)")
     opcion = input("Selecciona (H/C): ").strip().upper()
 
     if opcion == "H":
-        print("\nIniciando Tor y servicio oculto...")
-        onion_address = iniciar_tor()
-        print(f"Tu dirección .onion: {onion_address}")
         servidor()
     
     elif opcion == "C":
