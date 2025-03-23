@@ -1,0 +1,131 @@
+import os
+import socket
+import socks
+import threading
+import json
+import base64
+import hashlib
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+
+# Configuración de Tor y puerto oculto
+TOR_PROXY = ("127.0.0.1", 9050)
+HIDDEN_SERVICE_DIR = "/data/data/com.termux/files/home/.tor/hidden_service/"
+PORT = 5000
+
+# Generar clave de cifrado AES con una contraseña única por sesión
+SESSION_KEY = hashlib.sha256(get_random_bytes(16)).digest()
+
+
+def cifrar_mensaje(mensaje):
+    """Cifra un mensaje con AES-256 en modo CBC"""
+    cipher = AES.new(SESSION_KEY, AES.MODE_CBC)
+    iv = cipher.iv
+    ciphertext = cipher.encrypt(mensaje.ljust(32).encode())  # Padding
+    return base64.b64encode(iv + ciphertext).decode()
+
+
+def descifrar_mensaje(mensaje_cifrado):
+    """Descifra un mensaje cifrado con AES-256 en modo CBC"""
+    raw = base64.b64decode(mensaje_cifrado)
+    iv = raw[:16]
+    ciphertext = raw[16:]
+    cipher = AES.new(SESSION_KEY, AES.MODE_CBC, iv)
+    return cipher.decrypt(ciphertext).strip().decode()
+
+
+def iniciar_tor():
+    """Inicia el servicio oculto en Tor y devuelve la dirección .onion"""
+    if not os.path.exists(HIDDEN_SERVICE_DIR):
+        os.makedirs(HIDDEN_SERVICE_DIR)
+    
+    torrc_path = os.path.expanduser("~/.torrc")
+    with open(torrc_path, "w") as torrc:
+        torrc.write(f"HiddenServiceDir {HIDDEN_SERVICE_DIR}\n")
+        torrc.write(f"HiddenServicePort {PORT} 127.0.0.1:{PORT}\n")
+
+    os.system("pkill tor")
+    os.system("tor &")
+    
+    # Esperar a que Tor genere el servicio
+    while not os.path.exists(f"{HIDDEN_SERVICE_DIR}/hostname"):
+        pass
+    
+    with open(f"{HIDDEN_SERVICE_DIR}/hostname", "r") as f:
+        return f.read().strip()
+
+
+def servidor():
+    """Función que inicia el servidor y espera conexiones"""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", PORT))
+    server.listen(1)
+    print("Esperando conexión...")
+    
+    conn, addr = server.accept()
+    print("Cliente conectado.")
+
+    while True:
+        try:
+            data = conn.recv(1024).decode()
+            if not data:
+                break
+            print(f"\nCliente: {descifrar_mensaje(data)}")
+            msg = input("Tú: ")
+            conn.send(cifrar_mensaje(msg).encode())
+        except:
+            break
+
+    conn.close()
+    server.close()
+
+
+def cliente(onion_address):
+    """Función que actúa como cliente y se conecta al servidor"""
+    socks.set_default_proxy(socks.SOCKS5, *TOR_PROXY)
+    client = socks.socksocket()
+    client.connect((onion_address, PORT))
+    print("Conectado al servidor.")
+
+    def recibir():
+        """Hilo para recibir mensajes"""
+        while True:
+            try:
+                data = client.recv(1024).decode()
+                if not data:
+                    break
+                print(f"\nServidor: {descifrar_mensaje(data)}")
+            except:
+                break
+
+    threading.Thread(target=recibir, daemon=True).start()
+
+    while True:
+        msg = input("Tú: ")
+        client.send(cifrar_mensaje(msg).encode())
+
+
+def main():
+    print("🔒 Chat Seguro con Tor y Cifrado AES 🔒")
+    username = input("Elige un nombre de usuario único para esta sesión: ")
+    
+    print("\n¿Quieres ser el Host o el Cliente?")
+    print("[H] Host (crear chat)")
+    print("[C] Cliente (conectarse)")
+    opcion = input("Selecciona (H/C): ").strip().upper()
+
+    if opcion == "H":
+        print("\nIniciando Tor y servicio oculto...")
+        onion_address = iniciar_tor()
+        print(f"Tu dirección .onion: {onion_address}")
+        servidor()
+    
+    elif opcion == "C":
+        onion_address = input("\nIngresa la dirección .onion del host: ")
+        cliente(onion_address)
+    
+    else:
+        print("Opción no válida. Saliendo.")
+
+if __name__ == "__main__":
+    main()
